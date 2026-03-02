@@ -12,10 +12,11 @@ print()
 TIMEZONE             = "Europe/Istanbul"
 RUN_HOUR             = 7
 RUN_MINUTE           = 0
-DAYS_LOOKBACK        = 120
+DAYS_LOOKBACK        = 60
 DAYS_LOOKBACK_AUTHOR = 300
 MAX_PAPERS_PER_TOPIC = 5
 MAX_AUTHOR_PAPERS    = 10
+MAX_SCHOLAR_PAPERS   = 5
 
 TRACKED_AUTHORS = [
     "Serdar Bozdag",
@@ -37,6 +38,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("ResearchBot")
 
+print(f"Loading {LLM_MODEL} in 4-bit on GPU...")
+print("First run downloads ~4 GB - takes 2-4 minutes...\n")
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -54,6 +57,14 @@ model     = AutoModelForCausalLM.from_pretrained(
 model.eval()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"\nModel loaded on {device.upper()}")
+if device == "cpu":
+    print("No GPU - generation will be very slow.")
+    print("   Go to Runtime -> Change runtime type -> T4 GPU and re-run.\n")
+else:
+    mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f"   GPU : {torch.cuda.get_device_name(0)}")
+    print(f"   VRAM: {mem:.1f} GB\n")
 
 TOPICS = [
     {
@@ -63,8 +74,16 @@ TOPICS = [
             'abs:"graph neural network" OR abs:"GNN" OR abs:"graph convolutional"',
             'ti:"omics integration" OR ti:"multi-omics"',
         ],
-        "biorxiv_terms": ["multi-omics graph neural", "GNN omics integration",
-                          "multi-omics GNN", "omics graph convolutional"],
+        # Europe PMC / bioRxiv search terms
+        "biorxiv_terms": [
+            "multi-omics graph neural network",
+            "GNN omics integration",
+            "multi-omics graph convolutional",
+        ],
+        # Semantic Scholar queries
+        "scholar_queries": [
+            "multi-omics GNN integration graph neural network",
+        ],
         "must_contain_any": ["multi-omics", "multiomics", "multi-modal omics",
                              "omics integration", "genomics", "transcriptomics",
                              "proteomics", "metabolomics"],
@@ -72,29 +91,40 @@ TOPICS = [
                                   "graph attention", "graph transformer"],
     },
     {
-        "name": "Cancer Biomarker Discovery — Multi-Omics ML",
+        "name": "Cancer Biomarker Discovery - Multi-Omics ML",
         "arxiv_queries": [
             'abs:"multi-omics" OR abs:"multi-modal omics"',
             'abs:"cancer" OR abs:"tumor" OR abs:"oncology"',
             'abs:"biomarker" OR abs:"prognosis" OR abs:"survival prediction"',
         ],
-        "biorxiv_terms": ["multi-omics cancer biomarker", "cancer multi-omics prognosis",
-                          "pan-cancer omics", "multi-omics survival"],
+        "biorxiv_terms": [
+            "multi-omics cancer biomarker",
+            "cancer multi-omics prognosis survival",
+            "pan-cancer omics machine learning",
+        ],
+        "scholar_queries": [
+            "multi-omics cancer biomarker machine learning prognosis",
+        ],
         "must_contain_any": ["multi-omics", "multiomics", "omics integration",
                              "genomics", "transcriptomics", "proteomics"],
         "must_also_contain_any": ["cancer", "tumor", "tumour", "oncology",
                                   "carcinoma", "leukemia", "glioma"],
     },
     {
-        "name": "Alzheimer's Disease Progression — Multi-Omics ML",
+        "name": "Alzheimer's Disease Progression - Multi-Omics ML",
         "arxiv_queries": [
             "abs:\"Alzheimer\" OR abs:\"Alzheimer's disease\" OR ti:\"Alzheimer\"",
             'abs:"omics" OR abs:"genomics" OR abs:"proteomics" OR abs:"transcriptomics"',
             'abs:"machine learning" OR abs:"deep learning" OR abs:"neural network"',
         ],
-        "biorxiv_terms": ["Alzheimer multi-omics", "Alzheimer genomics deep learning",
-                          "Alzheimer proteomics machine learning",
-                          "Alzheimer transcriptomics"],
+        "biorxiv_terms": [
+            "Alzheimer multi-omics machine learning",
+            "Alzheimer genomics deep learning",
+            "Alzheimer proteomics transcriptomics",
+        ],
+        "scholar_queries": [
+            "Alzheimer disease multi-omics deep learning progression",
+        ],
         "must_contain_any": ["alzheimer", "alzheimer's", "ad progression",
                              "dementia", "neurodegeneration"],
         "must_also_contain_any": ["omics", "genomics", "proteomics", "transcriptomics",
@@ -108,10 +138,14 @@ TOPICS = [
             'abs:"histopathology" OR abs:"whole slide image" OR abs:"H&E"',
             'abs:"spatial gene expression" OR abs:"visium" OR abs:"10x spatial"',
         ],
-        "biorxiv_terms": ["spatial transcriptomics histopathology",
-                          "spatial transcriptomics deep learning",
-                          "spatial gene expression histology",
-                          "visium deep learning"],
+        "biorxiv_terms": [
+            "spatial transcriptomics histopathology deep learning",
+            "spatial gene expression histology neural network",
+            "visium spatial transcriptomics transformer",
+        ],
+        "scholar_queries": [
+            "spatial transcriptomics histopathology deep learning whole slide",
+        ],
         "must_contain_any": ["spatial transcriptomics", "spatial gene expression",
                              "visium", "spatial omics", "10x spatial"],
         "must_also_contain_any": ["histopathology", "histology", "whole slide",
@@ -131,12 +165,14 @@ class Paper:
     pdf_url:       str
     categories:    list
     source:        str = "arXiv"
-    notes: str = ""
+    lecture_notes: str = ""
+
 
 def is_relevant(paper, must_contain_any, must_also_contain_any):
     text = (paper.title + " " + paper.abstract).lower()
     return (any(kw.lower() in text for kw in must_contain_any) and
             any(kw.lower() in text for kw in must_also_contain_any))
+
 
 class ArxivFetcher:
     BASE_URL = "https://export.arxiv.org/api/query"
@@ -192,7 +228,6 @@ class ArxivFetcher:
                 ) as r:
                     if r.status == 200:
                         candidates = self._parse(await r.text())
-                        # Filter: at least one author must match the full name
                         for p in candidates:
                             if any(author_name.lower() in a.lower() for a in p.authors):
                                 papers.append(p)
@@ -227,94 +262,275 @@ class ArxivFetcher:
             log.error(f"arXiv XML parse: {ex}")
         return papers
 
+
 class BiorxivFetcher:
-    BASE_URL = "https://api.biorxiv.org/details/biorxiv/{start}/{end}/0/json"
+    SEARCH_URL  = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+    AUTHOR_URL  = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
     def __init__(self, session):
         self.session = session
 
-    async def _fetch_window(self, days_back):
-        end_date   = datetime.now(timezone.utc).date()
-        start_date = end_date - timedelta(days=days_back)
-        url        = self.BASE_URL.format(
-            start=start_date.strftime("%Y-%m-%d"),
-            end=end_date.strftime("%Y-%m-%d"),
-        )
-        all_items = []
-        cursor    = 0
-        while True:
-            paged_url = url.replace("/0/json", f"/{cursor}/json")
-            try:
-                async with self.session.get(paged_url, timeout=aiohttp.ClientTimeout(total=30)) as r:
-                    if r.status != 200:
-                        break
-                    data  = await r.json(content_type=None)
-                    items = data.get("collection", [])
-                    if not items:
-                        break
-                    all_items.extend(items)
-                    total = int(data.get("messages", [{}])[0].get("total", 0))
-                    cursor += len(items)
-                    if cursor >= total or cursor >= 200:   # cap at 200 to stay fast
-                        break
-                    await asyncio.sleep(1)
-            except Exception as e:
-                log.error(f"bioRxiv pagination error: {e}")
-                break
-        return all_items
+    def _date_filter(self, days_back: int) -> str:
+        since = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return f"FIRST_PDATE:[{since} TO {today}]"
 
-    def _item_to_paper(self, item):
+    def _item_to_paper(self, item: dict) -> Paper:
+        pmcid    = item.get("id", "")
         doi      = item.get("doi", "")
-        bxid     = doi.replace("/", "_") if doi else item.get("title", "")[:30].replace(" ", "_")
-        authors  = [a.strip() for a in re.split(r"[;,]", item.get("authors", "")) if a.strip()]
-        category = item.get("category", "")
+        title    = item.get("title", "").strip().rstrip(".")
+        abstract = item.get("abstractText", "") or item.get("abstract", "")
+        abstract = abstract.strip()
+        date     = item.get("firstPublicationDate", "") or item.get("pubYear", "")
+        # authors
+        author_list = []
+        for a in item.get("authorList", {}).get("author", []):
+            full = (a.get("fullName") or
+                    f"{a.get('firstName','')} {a.get('lastName','')}").strip()
+            if full:
+                author_list.append(full)
+        if not author_list:
+            raw = item.get("authorString", "")
+            author_list = [x.strip() for x in re.split(r"[;,]", raw) if x.strip()]
+        url     = f"https://doi.org/{doi}" if doi else f"https://europepmc.org/article/PPR/{pmcid}"
+        pdf_url = f"https://www.biorxiv.org/content/{doi}.full.pdf" if doi and "biorxiv" in doi.lower() else ""
         return Paper(
-            arxiv_id   = f"biorxiv_{bxid}",
-            title      = item.get("title", "").strip(),
-            abstract   = item.get("abstract", "").strip(),
-            published  = item.get("date", ""),
-            authors    = authors,
-            url        = f"https://doi.org/{doi}" if doi else "https://www.biorxiv.org",
-            pdf_url    = f"https://www.biorxiv.org/content/{doi}.full.pdf" if doi else "",
-            categories = [category] if category else ["bioRxiv"],
+            arxiv_id   = f"epmc_{pmcid or doi.replace('/','_')}",
+            title      = title,
+            abstract   = abstract,
+            published  = date,
+            authors    = author_list,
+            url        = url,
+            pdf_url    = pdf_url,
+            categories = ["bioRxiv/Preprint"],
             source     = "bioRxiv",
         )
 
-    async def search(self, terms: list, days_back: int, max_results: int = 15) -> list:
-        items   = await self._fetch_window(days_back)
-        papers  = []
-        seen    = set()
-        for item in items:
-            text = (item.get("title", "") + " " + item.get("abstract", "")).lower()
-            if any(t.lower() in text for t in terms):
-                p = self._item_to_paper(item)
-                if p.arxiv_id not in seen:
-                    seen.add(p.arxiv_id)
-                    papers.append(p)
-            if len(papers) >= max_results:
-                break
+    async def _epmc_search(self, query: str, page_size: int = 25) -> list:
+        params = {
+            "query":      query,
+            "source":     "PPR",           # preprints
+            "resultType": "core",
+            "pageSize":   page_size,
+            "format":     "json",
+            "cursorMark": "*",
+        }
+        papers = []
+        try:
+            async with self.session.get(
+                self.SEARCH_URL, params=params,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                if r.status != 200:
+                    log.warning(f"Europe PMC status {r.status} for query: {query[:60]}")
+                    return []
+                data    = await r.json(content_type=None)
+                results = data.get("resultList", {}).get("result", [])
+                for item in results:
+                    try:
+                        papers.append(self._item_to_paper(item))
+                    except Exception as ex:
+                        log.warning(f"Europe PMC parse error: {ex}")
+        except Exception as e:
+            log.error(f"Europe PMC search error: {e}")
         return papers
+
+    async def search(self, terms: list, days_back: int, max_results: int = 15) -> list:
+        date_flt = self._date_filter(days_back)
+        seen, all_papers = set(), []
+        for term in terms:
+            query   = f'({term}) AND {date_flt}'
+            papers  = await self._epmc_search(query, page_size=max_results)
+            log.info(f"  [Europe PMC/bioRxiv] '{term[:50]}' → {len(papers)} results")
+            for p in papers:
+                if p.arxiv_id not in seen and p.title:
+                    seen.add(p.arxiv_id)
+                    all_papers.append(p)
+            if len(all_papers) >= max_results * 2:
+                break
+            await asyncio.sleep(1)
+        return all_papers[:max_results * 2] 
 
     async def search_by_author(self, author_name: str, days_back: int,
                                max_results: int = 20) -> list:
-        items   = await self._fetch_window(days_back)
-        papers  = []
-        seen    = set()
-        name_lc = author_name.lower()
-        last    = author_name.strip().split()[-1].lower()
-        for item in items:
-            authors_raw = item.get("authors", "").lower()
-            if name_lc in authors_raw or last in authors_raw:
-                p = self._item_to_paper(item)
-                if p.arxiv_id not in seen:
-                    seen.add(p.arxiv_id)
-                    papers.append(p)
-            if len(papers) >= max_results:
-                break
+        date_flt  = self._date_filter(days_back)
+        last_name = author_name.strip().split()[-1]
+        for name_q in [f'AUTH:"{author_name}"', f'AUTH:{last_name}']:
+            query  = f'{name_q} AND {date_flt}'
+            papers = await self._epmc_search(query, page_size=max_results)
+            verified = []
+            for p in papers:
+                if any(author_name.lower() in a.lower() or last_name.lower() in a.lower()
+                       for a in p.authors):
+                    verified.append(p)
+            if verified:
+                log.info(f"  [Europe PMC/bioRxiv] author '{author_name}' → {len(verified)} papers")
+                return verified[:max_results]
+            await asyncio.sleep(1)
+        return []
+
+
+class GoogleScholarFetcher:
+    SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+    AUTHOR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/author/search"
+    AUTHOR_PAPERS_URL = "https://api.semanticscholar.org/graph/v1/author/{author_id}/papers"
+
+    PAPER_FIELDS  = "paperId,title,abstract,authors,year,externalIds,openAccessPdf,publicationDate"
+    AUTHOR_FIELDS = "authorId,name,paperCount"
+
+    def __init__(self):
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                headers={"User-Agent": "ResearchBot/1.0 (academic use)"}
+            )
+        return self._session
+
+    @staticmethod
+    def _item_to_paper(item: dict) -> Paper | None:
+        title    = (item.get("title") or "").strip()
+        abstract = (item.get("abstract") or "").strip()
+        if not title:
+            return None
+        authors  = [a.get("name", "").strip() for a in item.get("authors", []) if a.get("name")]
+        year     = str(item.get("year") or item.get("publicationDate", "")[:4] if item.get("publicationDate") else "")
+        pid      = item.get("paperId", title[:30].replace(" ", "_"))
+
+        ext      = item.get("externalIds") or {}
+        doi      = ext.get("DOI", "")
+        url      = (f"https://doi.org/{doi}" if doi
+                    else f"https://www.semanticscholar.org/paper/{pid}")
+        pdf_info = item.get("openAccessPdf") or {}
+        pdf_url  = pdf_info.get("url", "")
+
+        return Paper(
+            arxiv_id   = f"s2_{pid}",
+            title      = title,
+            abstract   = abstract,
+            published  = year,
+            authors    = authors if authors else ["Unknown"],
+            url        = url,
+            pdf_url    = pdf_url,
+            categories = ["Semantic Scholar"],
+            source     = "Semantic Scholar",
+        )
+
+    async def _s2_search(self, query: str, year_start: int,
+                         max_results: int = 10) -> list:
+        session = await self._get_session()
+        params  = {
+            "query":         query,
+            "fields":        self.PAPER_FIELDS,
+            "limit":         min(max_results, 100),
+            "year":          f"{year_start}-",   # e.g. "2024-"
+        }
+        papers = []
+        try:
+            async with session.get(
+                self.SEARCH_URL, params=params,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as r:
+                if r.status == 429:
+                    log.warning("Semantic Scholar rate-limited (429) — skipping query.")
+                    return []
+                if r.status != 200:
+                    log.warning(f"Semantic Scholar status {r.status} for: {query[:60]}")
+                    return []
+                data = await r.json(content_type=None)
+                for item in data.get("data", []):
+                    p = self._item_to_paper(item)
+                    if p:
+                        papers.append(p)
+        except asyncio.TimeoutError:
+            log.warning(f"Semantic Scholar timeout for: {query[:50]}")
+        except Exception as e:
+            log.error(f"Semantic Scholar search error: {e}")
         return papers
 
+    async def search(self, queries: list, days_back: int,
+                     max_results: int = 5) -> list:
+        since_year = (datetime.now(timezone.utc) - timedelta(days=days_back)).year
+        seen, all_papers = set(), []
 
-def generate_notes(paper: Paper) -> str:
+        for query in queries:
+            log.info(f"  [Semantic Scholar] '{query[:60]}'")
+            papers = await self._s2_search(query, since_year, max_results=max_results * 2)
+            log.info(f"    → {len(papers)} results")
+            for p in papers:
+                if p.arxiv_id not in seen and p.title:
+                    seen.add(p.arxiv_id)
+                    all_papers.append(p)
+            await asyncio.sleep(1.5)
+
+        return all_papers[:max_results]
+
+    async def search_by_author(self, author_name: str, days_back: int,
+                               max_results: int = 10) -> list:
+        since_year = (datetime.now(timezone.utc) - timedelta(days=days_back)).year
+        session    = await self._get_session()
+
+        author_id = None
+        try:
+            async with session.get(
+                self.AUTHOR_SEARCH_URL,
+                params={"query": author_name, "fields": self.AUTHOR_FIELDS, "limit": 5},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    for candidate in data.get("data", []):
+                        name = candidate.get("name", "")
+                        last = author_name.strip().split()[-1].lower()
+                        if author_name.lower() in name.lower() or last in name.lower():
+                            author_id = candidate.get("authorId")
+                            log.info(f"  [S2 author] found '{name}' id={author_id}")
+                            break
+        except Exception as e:
+            log.error(f"S2 author search error: {e}")
+
+        if not author_id:
+            log.warning(f"  [S2 author] no profile found for '{author_name}'")
+            return []
+
+        await asyncio.sleep(1)
+        papers = []
+        try:
+            url = self.AUTHOR_PAPERS_URL.format(author_id=author_id)
+            async with session.get(
+                url,
+                params={
+                    "fields": self.PAPER_FIELDS,
+                    "limit":  min(max_results * 3, 100),
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    for item in data.get("data", []):
+                        p = self._item_to_paper(item)
+                        if p:
+                            year_str = p.published
+                            year_ok  = (not year_str or
+                                        not year_str.isdigit() or
+                                        int(year_str) >= since_year)
+                            if year_ok:
+                                papers.append(p)
+                else:
+                    log.warning(f"S2 author papers status {r.status}")
+        except Exception as e:
+            log.error(f"S2 author papers error: {e}")
+
+        log.info(f"  [S2 author] '{author_name}' → {len(papers)} papers since {since_year}")
+        return papers[:max_results]
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+
+def generate_lecture_notes(paper: Paper) -> str:
     authors_str = ", ".join(paper.authors[:5])
     if len(paper.authors) > 5:
         authors_str += f" et al. ({len(paper.authors)} total)"
@@ -360,14 +576,14 @@ def generate_notes(paper: Paper) -> str:
             f"<|user|>{messages[1]['content']}<|end|>\n<|assistant|>"
         )
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=3072)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     try:
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=1024,
+                max_new_tokens=2048,
                 do_sample=True,
                 temperature=0.4,
                 top_p=0.9,
@@ -378,15 +594,36 @@ def generate_notes(paper: Paper) -> str:
         return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
     except torch.cuda.OutOfMemoryError:
         torch.cuda.empty_cache()
-        log.error("GPU OOM — clearing cache, using fallback.")
+        log.error("GPU OOM - clearing cache, using fallback.")
         return _fallback_notes(paper)
     except Exception as ex:
         log.error(f"Generation error: {ex}")
         return _fallback_notes(paper)
 
 
-def _fallback_notes(paper: Paper):
-    pass
+def _fallback_notes(paper: Paper) -> str:
+    sents   = [s.strip() for s in paper.abstract.split(". ") if s.strip()]
+    intro   = ". ".join(sents[:2]) + "."  if len(sents) >= 2 else paper.abstract
+    methods = ". ".join(sents[2:5]) + "." if len(sents) >  4 else "See full abstract."
+    results = ". ".join(sents[5:])  + "." if len(sents) >  5 else "See full abstract."
+    return (
+        f"*1. CORE CONTRIBUTION*\n{intro}\n\n"
+        f"*2. BIOLOGICAL CONTEXT*\n"
+        f"Addresses a key challenge in computational biology and precision medicine.\n\n"
+        f"*3. METHODOLOGY*\n{methods}\n\n"
+        f"*4. KEY RESULTS*\n{results}\n\n"
+        f"*5. CRITICAL ANALYSIS*\n"
+        f"Strengths: Novel methodological contribution with clear biological motivation.\n"
+        f"Limitations: Independent cohort validation needed.\n\n"
+        f"*6. FUTURE DIRECTIONS*\n"
+        f"Patient stratification, biomarker discovery, and clinical translation.\n\n"
+        f"*7. KEY TAKEAWAYS*\n"
+        f"- Multi-modal data integration requires careful architectural design\n"
+        f"- ML reveals non-linear patterns invisible to traditional statistics\n"
+        f"- Interpretability and explainability remain active frontiers\n"
+        f"- Reproducibility depends on open data and code sharing\n\n"
+        f"_(Fallback notes - GPU generation failed)_"
+    )
 
 
 def blk_header(text):
@@ -430,12 +667,11 @@ async def slack_post(client, text, blocks):
         await asyncio.sleep(0.5)
 
 async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
-    source_badge = "arXiv" if paper.source == "arXiv" else "bioRxiv"
+    source_badge = paper.source
 
     if generate_notes:
         print(f"    [{idx}/{total}] {source_badge}  {paper.title[:60]}...")
-        print(f"    Generating notes on GPU...")
-        paper.notes = generate_notes(paper)
+        paper.lecture_notes = generate_lecture_notes(paper)
         if device == "cuda":
             torch.cuda.empty_cache()
 
@@ -444,6 +680,10 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
         authors_str += f" +{len(paper.authors)-3} more"
     abstract_preview = (paper.abstract[:450] + "..."
                         if len(paper.abstract) > 450 else paper.abstract)
+
+    link_parts = [f"<{paper.url}|View Paper>"]
+    if paper.pdf_url:
+        link_parts.append(f"<{paper.pdf_url}|Download PDF>")
 
     await slack_post(client,
         text=paper.title,
@@ -458,21 +698,53 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
                 f"*Categories:* {', '.join(paper.categories[:3])}"
             ),
             blk_section(f"*Abstract:*\n{abstract_preview}"),
-            blk_section(f"<{paper.url}|View Paper>  |  <{paper.pdf_url}|Download PDF>"),
+            blk_section("  |  ".join(link_parts)),
         ],
     )
 
-    if generate_notes and paper.notes:
-        note_blocks = [blk_header(f"Notes for {paper.title[:80]}")]
-        for chunk in chunk_text(paper.notes, 2800):
+    if generate_notes and paper.lecture_notes:
+        note_blocks = [blk_header(f"Notes: {paper.title[:200]}")]
+        for chunk in chunk_text(paper.lecture_notes, 5000):
             note_blocks.append(blk_section(chunk))
         await slack_post(client, text="Notes", blocks=note_blocks)
 
-    print(f"Posted.")
+    print(f"    Posted.")
     await asyncio.sleep(2)
 
 
-async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher):
+async def post_scholar_paper(client, paper, idx, total):
+    print(f"    [{idx}/{total}] Google Scholar  {paper.title[:60]}...")
+    authors_str = ", ".join(paper.authors[:3])
+    if len(paper.authors) > 3:
+        authors_str += f" +{len(paper.authors)-3} more"
+    abstract_preview = (paper.abstract[:450] + "..."
+                        if len(paper.abstract) > 450 else paper.abstract) or "_No abstract available._"
+
+    url_text = f"<{paper.url}|View Paper>" if paper.url else "_No URL available_"
+
+    await slack_post(client,
+        text=paper.title,
+        blocks=[
+            blk_divider(),
+            blk_header(f"Scholar {idx} of {total}  [Semantic Scholar]"),
+            blk_section(
+                f"*{paper.title}*\n\n"
+                f"*Authors:* {authors_str}\n"
+                f"*Year:* {paper.published or 'N/A'}"
+                + (f"   *Source:* Semantic Scholar")
+            ),
+            blk_section(f"*Abstract:*\n{abstract_preview}"),
+            blk_section(url_text),
+            blk_context("_No LLM lecture notes for Semantic Scholar results._"),
+        ],
+    )
+    print(f"    Posted (no LLM notes).")
+    await asyncio.sleep(1)
+
+
+async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fetcher):
+    print(f"  Author Tracking")
+
     await slack_post(client,
         text="Author Tracking",
         blocks=[
@@ -480,7 +752,8 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher):
             blk_header("Author Tracking"),
             blk_section(
                 f"Recent papers by tracked authors "
-                f"(last {DAYS_LOOKBACK_AUTHOR} days):\n"
+                f"(arXiv/bioRxiv: last {DAYS_LOOKBACK_AUTHOR} days, "
+                f"Semantic Scholar: last {DAYS_LOOKBACK_AUTHOR} days):\n"
                 + "\n".join(f"  • {a}" for a in TRACKED_AUTHORS)
             ),
         ],
@@ -493,11 +766,11 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher):
 
         await slack_post(client,
             text=f"Papers by {author}",
-            blocks=[blk_section(f"*🔎 Papers by {author}*")],
+            blocks=[blk_section(f"*Papers by {author}*")],
         )
 
-        seen_ids = set()
-        all_papers = []
+        seen_ids, preprint_papers = set(), []
+
         print(f"    arXiv...")
         arxiv_papers = await arxiv_fetcher.search_by_author(
             author, DAYS_LOOKBACK_AUTHOR, max_results=MAX_AUTHOR_PAPERS
@@ -505,62 +778,79 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher):
         for p in arxiv_papers:
             if p.arxiv_id not in seen_ids:
                 seen_ids.add(p.arxiv_id)
-                all_papers.append(p)
+                preprint_papers.append(p)
         await asyncio.sleep(2)
 
-        print(f"    bioRxiv...")
+        print(f"    bioRxiv (Europe PMC)...")
         biorxiv_papers = await biorxiv_fetcher.search_by_author(
             author, DAYS_LOOKBACK_AUTHOR, max_results=MAX_AUTHOR_PAPERS
         )
         for p in biorxiv_papers:
             if p.arxiv_id not in seen_ids:
                 seen_ids.add(p.arxiv_id)
-                all_papers.append(p)
+                preprint_papers.append(p)
 
-        print(f"    Found {len(all_papers)} paper(s) "
+        print(f"    Found {len(preprint_papers)} preprint paper(s) "
               f"({len(arxiv_papers)} arXiv, {len(biorxiv_papers)} bioRxiv)")
 
-        if not all_papers:
+        if preprint_papers:
             await slack_post(client,
-                text="No recent papers found.",
+                text=f"arXiv / bioRxiv papers by {author}",
+                blocks=[blk_section(
+                    f"*arXiv / bioRxiv papers by {author}* "
+                    f"({len(preprint_papers)} found — LLM notes included)"
+                )],
+            )
+            for idx, paper in enumerate(preprint_papers[:MAX_AUTHOR_PAPERS], 1):
+                for tracked in TRACKED_AUTHORS:
+                    paper.authors = [
+                        f"*{a}*" if tracked.lower() in a.lower() else a
+                        for a in paper.authors
+                    ]
+                print(f"    Generating LLM notes for author paper [{idx}]...")
+                await post_paper_with_notes(client, paper, idx, len(preprint_papers), generate_notes=True)
+                total_author_papers += 1
+        else:
+            await slack_post(client,
+                text="No recent preprint papers found.",
                 blocks=[blk_section(
                     f"_No papers found for *{author}* "
                     f"on arXiv or bioRxiv in the last {DAYS_LOOKBACK_AUTHOR} days._\n"
                     f"_(Note: arXiv author search may miss papers if the name format varies)_"
                 )],
             )
-            continue
 
-        for idx, paper in enumerate(all_papers[:MAX_AUTHOR_PAPERS], 1):
-            source_badge = "arXiv" if paper.source == "arXiv" else "bioRxiv"
-            authors_str  = ", ".join(paper.authors[:4])
-            if len(paper.authors) > 4:
-                authors_str += f" +{len(paper.authors)-4} more"
-            abstract_preview = (paper.abstract[:350] + "..."
-                                if len(paper.abstract) > 350 else paper.abstract)
+        print(f"    Semantic Scholar (author)...")
+        scholar_papers = await scholar_fetcher.search_by_author(
+            author, DAYS_LOOKBACK_AUTHOR, max_results=MAX_AUTHOR_PAPERS
+        )
+        scholar_unique = []
+        preprint_titles = {p.title.lower()[:60] for p in preprint_papers}
+        for p in scholar_papers:
+            if p.arxiv_id not in seen_ids and p.title.lower()[:60] not in preprint_titles:
+                seen_ids.add(p.arxiv_id)
+                scholar_unique.append(p)
 
-            for tracked in TRACKED_AUTHORS:
-                authors_str = authors_str.replace(
-                    tracked, f"*{tracked}*"
-                )
+        print(f"    Found {len(scholar_unique)} additional Semantic Scholar paper(s)")
 
+        if scholar_unique:
             await slack_post(client,
-                text=paper.title,
-                blocks=[
-                    blk_divider(),
-                    blk_header(f"{source_badge}  Paper {idx} of {len(all_papers)}"),
-                    blk_section(
-                        f"*<{paper.url}|{paper.title}>*\n\n"
-                        f"*Authors:* {authors_str}\n"
-                        f"*Published:* {paper.published}   "
-                        f"*Categories:* {', '.join(paper.categories[:3])}"
-                    ),
-                    blk_section(f"*Abstract:*\n{abstract_preview}"),
-                    blk_section(f"<{paper.url}|View Paper>  |  <{paper.pdf_url}|Download PDF>"),
-                ],
+                text=f"Semantic Scholar papers by {author}",
+                blocks=[blk_section(
+                    f"*Semantic Scholar papers by {author}* "
+                    f"({len(scholar_unique)} found — titles & abstracts only, no LLM notes)"
+                )],
             )
-            total_author_papers += 1
-            await asyncio.sleep(1)
+            for idx, paper in enumerate(scholar_unique, 1):
+                await post_scholar_paper(client, paper, idx, len(scholar_unique))
+                total_author_papers += 1
+        else:
+            await slack_post(client,
+                text="No additional Semantic Scholar papers found.",
+                blocks=[blk_section(
+                    f"_No additional Semantic Scholar papers found for *{author}*._"
+                )],
+            )
 
     return total_author_papers
 
@@ -570,16 +860,17 @@ async def run_digest(client):
     since = (now - timedelta(days=DAYS_LOOKBACK)).strftime("%B %d, %Y")
     today = now.strftime("%A, %B %d, %Y  %H:%M Istanbul")
 
+    print(f"  Starting digest - last {DAYS_LOOKBACK} days (since {since})")
 
     await slack_post(client,
-        text="Starting...",
+        text="Research Digest starting...",
         blocks=[
-            blk_header("Research Digest — Multi-Omics & ML"),
+            blk_header("Research Digest - Multi-Omics & ML"),
             blk_section(
                 f"*Date:* {today}\n"
                 f"*Topic Coverage:* Last {DAYS_LOOKBACK} days (since {since})\n"
                 f"*Author Coverage:* Last {DAYS_LOOKBACK_AUTHOR} days\n"
-                f"*Sources:* arXiv + bioRxiv\n\n"
+                f"*Sources:* arXiv + bioRxiv (Europe PMC) + Semantic Scholar\n\n"
                 f"*Topics:*\n"
                 f"  - Multi-Omics Integration with GNNs\n"
                 f"  - Cancer Biomarker Discovery\n"
@@ -587,7 +878,8 @@ async def run_digest(client):
                 f"  - Spatial Transcriptomics from Histology\n\n"
                 f"*Tracked Authors:*\n"
                 + "\n".join(f"  - {a}" for a in TRACKED_AUTHORS) + "\n\n"
-                f"_Running `{LLM_MODEL}` locally on {device.upper()}..._"
+                f"_Running `{LLM_MODEL}` locally on {device.upper()}..._\n"
+                f"_Semantic Scholar results listed without LLM notes._"
             ),
         ],
     )
@@ -595,13 +887,16 @@ async def run_digest(client):
     total_topic   = 0
     total_arxiv   = 0
     total_biorxiv = 0
+    total_scholar = 0
+
+    scholar_fetcher = GoogleScholarFetcher()
 
     async with aiohttp.ClientSession() as session:
         arxiv_fetcher   = ArxivFetcher(session)
         biorxiv_fetcher = BiorxivFetcher(session)
 
         for topic in TOPICS:
-            print(f"  {topic['name']}")
+            print(f"\n  Topic: {topic['name']}")
 
             await slack_post(client,
                 text=topic["name"],
@@ -611,7 +906,7 @@ async def run_digest(client):
 
             seen_ids, arxiv_candidates = set(), []
             for query in topic["arxiv_queries"]:
-                print(f"  [arXiv] {query}")
+                print(f"  [arXiv] {query[:70]}")
                 for p in await arxiv_fetcher.search(query, DAYS_LOOKBACK, max_results=15):
                     if p.arxiv_id not in seen_ids:
                         seen_ids.add(p.arxiv_id)
@@ -626,7 +921,7 @@ async def run_digest(client):
 
             biorxiv_candidates = []
             for term in topic["biorxiv_terms"]:
-                print(f"  [bioRxiv] {term}")
+                print(f"  [bioRxiv/EuropePMC] {term}")
                 for p in await biorxiv_fetcher.search([term], DAYS_LOOKBACK, max_results=15):
                     if p.arxiv_id not in seen_ids:
                         seen_ids.add(p.arxiv_id)
@@ -639,33 +934,77 @@ async def run_digest(client):
             ][:MAX_PAPERS_PER_TOPIC]
             print(f"  bioRxiv: {len(biorxiv_candidates)} fetched → {len(biorxiv_papers)} relevant")
 
-            all_papers = arxiv_papers + biorxiv_papers
 
-            if not all_papers:
+            all_preprint_papers = arxiv_papers + biorxiv_papers
+
+            if not all_preprint_papers:
                 await slack_post(client,
-                    text="No relevant papers found.",
+                    text="No relevant preprint papers found.",
                     blocks=[blk_section(
-                        f"_No relevant papers for *{topic['name']}* "
-                        f"in the last {DAYS_LOOKBACK} days on arXiv or bioRxiv._"
+                        f"_No relevant arXiv/bioRxiv papers for *{topic['name']}* "
+                        f"in the last {DAYS_LOOKBACK} days._"
                     )],
                 )
-                continue
+            else:
+                source_parts = []
+                if arxiv_papers:   source_parts.append(f"{len(arxiv_papers)} arXiv")
+                if biorxiv_papers: source_parts.append(f"{len(biorxiv_papers)} bioRxiv")
+                await slack_post(client,
+                    text=f"Found {len(all_preprint_papers)} preprint papers",
+                    blocks=[blk_context(
+                        f"Found {len(all_preprint_papers)} preprint paper(s): "
+                        f"{', '.join(source_parts)} — with LLM lecture notes"
+                    )],
+                )
+                for idx, paper in enumerate(all_preprint_papers, 1):
+                    await post_paper_with_notes(client, paper, idx,
+                                                len(all_preprint_papers), generate_notes=True)
+                    total_topic += 1
+                    if paper.source == "arXiv":  total_arxiv   += 1
+                    else:                         total_biorxiv += 1
 
-            source_parts = []
-            if arxiv_papers:   source_parts.append(f"{len(arxiv_papers)} arXiv")
-            if biorxiv_papers: source_parts.append(f"{len(biorxiv_papers)} bioRxiv")
-            await slack_post(client,
-                text=f"Found {len(all_papers)} papers",
-                blocks=[blk_context(f"Found {len(all_papers)} paper(s): {', '.join(source_parts)}")],
+            print(f"  [Semantic Scholar] searching topic...")
+            scholar_papers_raw = await scholar_fetcher.search(
+                topic.get("scholar_queries", [topic["name"]]),
+                DAYS_LOOKBACK,
+                max_results=MAX_SCHOLAR_PAPERS,
             )
 
-            for idx, paper in enumerate(all_papers, 1):
-                await post_paper_with_notes(client, paper, idx, len(all_papers), generate_notes=True)
-                total_topic += 1
-                if paper.source == "arXiv":   total_arxiv   += 1
-                else:                          total_biorxiv += 1
+            preprint_titles = {p.title.lower()[:60] for p in all_preprint_papers}
+            scholar_papers  = [
+                p for p in scholar_papers_raw
+                if p.title.lower()[:60] not in preprint_titles
+            ][:MAX_SCHOLAR_PAPERS]
+            print(f"  Google Scholar: {len(scholar_papers_raw)} fetched → "
+                  f"{len(scholar_papers)} unique")
 
-        total_author = await run_author_section(client, arxiv_fetcher, biorxiv_fetcher)
+            if scholar_papers:
+                await slack_post(client,
+                    text=f"Semantic Scholar results for {topic['name']}",
+                    blocks=[
+                        blk_context(
+                            f"*Semantic Scholar:* {len(scholar_papers)} additional paper(s) "
+                            f"— titles & abstracts only (no LLM notes)"
+                        )
+                    ],
+                )
+                for idx, paper in enumerate(scholar_papers, 1):
+                    await post_scholar_paper(client, paper, idx, len(scholar_papers))
+                    total_scholar += 1
+            else:
+                await slack_post(client,
+                    text="No additional Semantic Scholar results.",
+                    blocks=[blk_context(
+                        "_No additional Semantic Scholar results for this topic._"
+                    )],
+                )
+
+
+        total_author = await run_author_section(
+            client, arxiv_fetcher, biorxiv_fetcher, scholar_fetcher
+        )
+
+    await scholar_fetcher.close()
 
     tz  = ZoneInfo(TIMEZONE)
     now = datetime.now(tz)
@@ -675,29 +1014,35 @@ async def run_digest(client):
     h, rem = divmod(int((nxt - now).total_seconds()), 3600)
     m = rem // 60
 
+    grand_total = total_topic + total_scholar + total_author
+
     await slack_post(client,
-        text=f"Done, {total_topic + total_author} papers processed.",
+        text=f"Done - {grand_total} papers processed.",
         blocks=[
             blk_divider(),
-            blk_header("Complete"),
+            blk_header("Digest Complete"),
             blk_section(
-                f"*Topic papers:* {total_topic}  "
+                f"*Topic preprints (with LLM notes):* {total_topic}  "
                 f"(arXiv: {total_arxiv}, bioRxiv: {total_biorxiv})\n"
+                f"*Topic Semantic Scholar (no LLM notes):* {total_scholar}\n"
                 f"*Author papers:* {total_author}  "
                 f"({', '.join(TRACKED_AUTHORS)})\n\n"
                 f"Next automatic digest in *{h}h {m}m* "
-                f"(19:00 Istanbul time, UTC+3)."
+                f"({RUN_HOUR:02d}:{RUN_MINUTE:02d} Istanbul time, UTC+3)."
             ),
             blk_context(
-                f"ResearchBot  |  arXiv + bioRxiv  |  "
+                f"ResearchBot  |  arXiv + bioRxiv (Europe PMC) + Semantic Scholar  |  "
                 f"Local LLM: {LLM_MODEL}  |  Device: {device.upper()}"
             ),
         ],
     )
 
-    print(f"     Topic papers : {total_topic}  ({total_arxiv} arXiv, {total_biorxiv} bioRxiv)")
+    print(f"\n  Done")
+    print(f"     Topic preprints (LLM): {total_topic}  ({total_arxiv} arXiv, {total_biorxiv} bioRxiv)")
+    print(f"     Topic Semantic Scholar (no LLM): {total_scholar}")
     print(f"     Author papers: {total_author}")
     print(f"     Next digest  : {nxt.strftime('%Y-%m-%d %H:%M %Z')} (in {h}h {m}m)")
+
 
 
 async def scheduler(client):
@@ -717,6 +1062,7 @@ async def scheduler(client):
         except Exception as e:
             log.error(f"Scheduled digest error: {e}", exc_info=True)
 
+
 async def main():
     client = AsyncWebClient(token=SLACK_BOT_TOKEN)
     try:
@@ -726,8 +1072,8 @@ async def main():
         print(f"Slack auth failed: {e}")
         return
 
-    await run_digest(client)      # run immediately
-    await scheduler(client)       # then daily at 07:00 Istanbul
+    await run_digest(client)
+    await scheduler(client)
 
 
 asyncio.run(main())
