@@ -12,11 +12,11 @@ print()
 TIMEZONE             = "Europe/Istanbul"
 RUN_HOUR             = 7
 RUN_MINUTE           = 0
-DAYS_LOOKBACK        = 60
-DAYS_LOOKBACK_AUTHOR = 300
-MAX_PAPERS_PER_TOPIC = 5
+DAYS_LOOKBACK        = 7
+DAYS_LOOKBACK_AUTHOR = 20
+MAX_PAPERS_PER_TOPIC = 10
 MAX_AUTHOR_PAPERS    = 10
-MAX_SCHOLAR_PAPERS   = 5
+MAX_SCHOLAR_PAPERS   = 10
 
 TRACKED_AUTHORS = [
     "Serdar Bozdag",
@@ -670,7 +670,7 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
     source_badge = paper.source
 
     if generate_notes:
-        print(f"    [{idx}/{total}] {source_badge}  {paper.title[:60]}...")
+        print(f"    [{idx}/{total}] {source_badge}  {paper.title[:200]}...")
         paper.lecture_notes = generate_lecture_notes(paper)
         if device == "cuda":
             torch.cuda.empty_cache()
@@ -713,7 +713,7 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
 
 
 async def post_scholar_paper(client, paper, idx, total):
-    print(f"    [{idx}/{total}] Google Scholar  {paper.title[:60]}...")
+    print(f"    [{idx}/{total}] Google Scholar  {paper.title[:200]}...")
     authors_str = ", ".join(paper.authors[:3])
     if len(paper.authors) > 3:
         authors_str += f" +{len(paper.authors)-3} more"
@@ -735,7 +735,7 @@ async def post_scholar_paper(client, paper, idx, total):
             ),
             blk_section(f"*Abstract:*\n{abstract_preview}"),
             blk_section(url_text),
-            blk_context("_No LLM lecture notes for Semantic Scholar results._"),
+            blk_context("_No LLM notes for Semantic Scholar results._"),
         ],
     )
     print(f"    Posted (no LLM notes).")
@@ -953,7 +953,7 @@ async def run_digest(client):
                     text=f"Found {len(all_preprint_papers)} preprint papers",
                     blocks=[blk_context(
                         f"Found {len(all_preprint_papers)} preprint paper(s): "
-                        f"{', '.join(source_parts)} — with LLM lecture notes"
+                        f"{', '.join(source_parts)} — with LLM notes"
                     )],
                 )
                 for idx, paper in enumerate(all_preprint_papers, 1):
@@ -970,10 +970,10 @@ async def run_digest(client):
                 max_results=MAX_SCHOLAR_PAPERS,
             )
 
-            preprint_titles = {p.title.lower()[:60] for p in all_preprint_papers}
+            preprint_titles = {p.title.lower()[:200] for p in all_preprint_papers}
             scholar_papers  = [
                 p for p in scholar_papers_raw
-                if p.title.lower()[:60] not in preprint_titles
+                if p.title.lower()[:200] not in preprint_titles
             ][:MAX_SCHOLAR_PAPERS]
             print(f"  Google Scholar: {len(scholar_papers_raw)} fetched → "
                   f"{len(scholar_papers)} unique")
