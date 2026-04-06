@@ -12,14 +12,20 @@ print()
 TIMEZONE             = "Europe/Istanbul"
 RUN_HOUR             = 7
 RUN_MINUTE           = 0
-DAYS_LOOKBACK        = 7
+DAYS_LOOKBACK        = 15
 DAYS_LOOKBACK_AUTHOR = 20
 MAX_PAPERS_PER_TOPIC = 10
 MAX_AUTHOR_PAPERS    = 10
-MAX_SCHOLAR_PAPERS   = 10
+MAX_SCHOLAR_PAPERS   = 20
 
 TRACKED_AUTHORS = [
     "Serdar Bozdag",
+    "Jubair Ibn Malik Rifat",
+    "Yashu Vashishath",
+    "Most Tahmina Rahman",
+    "Suman Pandey",
+    "Bizhan Alipour Pijani",
+    "Neha Goud Baddam",
 ]
 
 LLM_MODEL = "HuggingFaceH4/zephyr-7b-beta"
@@ -74,13 +80,11 @@ TOPICS = [
             'abs:"graph neural network" OR abs:"GNN" OR abs:"graph convolutional"',
             'ti:"omics integration" OR ti:"multi-omics"',
         ],
-        # Europe PMC / bioRxiv search terms
         "biorxiv_terms": [
             "multi-omics graph neural network",
             "GNN omics integration",
             "multi-omics graph convolutional",
         ],
-        # Semantic Scholar queries
         "scholar_queries": [
             "multi-omics GNN integration graph neural network",
         ],
@@ -282,7 +286,6 @@ class BiorxivFetcher:
         abstract = item.get("abstractText", "") or item.get("abstract", "")
         abstract = abstract.strip()
         date     = item.get("firstPublicationDate", "") or item.get("pubYear", "")
-        # authors
         author_list = []
         for a in item.get("authorList", {}).get("author", []):
             full = (a.get("fullName") or
@@ -309,7 +312,7 @@ class BiorxivFetcher:
     async def _epmc_search(self, query: str, page_size: int = 25) -> list:
         params = {
             "query":      query,
-            "source":     "PPR",           # preprints
+            "source":     "PPR",
             "resultType": "core",
             "pageSize":   page_size,
             "format":     "json",
@@ -349,7 +352,7 @@ class BiorxivFetcher:
             if len(all_papers) >= max_results * 2:
                 break
             await asyncio.sleep(1)
-        return all_papers[:max_results * 2] 
+        return all_papers[:max_results * 2]
 
     async def search_by_author(self, author_name: str, days_back: int,
                                max_results: int = 20) -> list:
@@ -371,7 +374,7 @@ class BiorxivFetcher:
 
 
 class GoogleScholarFetcher:
-    SEARCH_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+    SEARCH_URL        = "https://api.semanticscholar.org/graph/v1/paper/search"
     AUTHOR_SEARCH_URL = "https://api.semanticscholar.org/graph/v1/author/search"
     AUTHOR_PAPERS_URL = "https://api.semanticscholar.org/graph/v1/author/{author_id}/papers"
 
@@ -421,10 +424,10 @@ class GoogleScholarFetcher:
                          max_results: int = 10) -> list:
         session = await self._get_session()
         params  = {
-            "query":         query,
-            "fields":        self.PAPER_FIELDS,
-            "limit":         min(max_results, 100),
-            "year":          f"{year_start}-",   # e.g. "2024-"
+            "query":  query,
+            "fields": self.PAPER_FIELDS,
+            "limit":  min(max_results, 100),
+            "year":   f"{year_start}-",
         }
         papers = []
         try:
@@ -576,14 +579,14 @@ def generate_lecture_notes(paper: Paper) -> str:
             f"<|user|>{messages[1]['content']}<|end|>\n<|assistant|>"
         )
 
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=3072)
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=5072)
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     try:
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=2048,
+                max_new_tokens=5048,
                 do_sample=True,
                 temperature=0.4,
                 top_p=0.9,
@@ -712,8 +715,15 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
     await asyncio.sleep(2)
 
 
+# ── MODIFIED: now generates LLM notes for Semantic Scholar papers too ──────────
 async def post_scholar_paper(client, paper, idx, total):
-    print(f"    [{idx}/{total}] Google Scholar  {paper.title[:200]}...")
+    print(f"    [{idx}/{total}] Semantic Scholar  {paper.title[:200]}...")
+
+    # Generate LLM lecture notes
+    paper.lecture_notes = generate_lecture_notes(paper)
+    if device == "cuda":
+        torch.cuda.empty_cache()
+
     authors_str = ", ".join(paper.authors[:3])
     if len(paper.authors) > 3:
         authors_str += f" +{len(paper.authors)-3} more"
@@ -730,16 +740,23 @@ async def post_scholar_paper(client, paper, idx, total):
             blk_section(
                 f"*{paper.title}*\n\n"
                 f"*Authors:* {authors_str}\n"
-                f"*Year:* {paper.published or 'N/A'}"
-                + (f"   *Source:* Semantic Scholar")
+                f"*Year:* {paper.published or 'N/A'}   *Source:* Semantic Scholar"
             ),
             blk_section(f"*Abstract:*\n{abstract_preview}"),
             blk_section(url_text),
-            blk_context("_No LLM notes for Semantic Scholar results._"),
         ],
     )
-    print(f"    Posted (no LLM notes).")
-    await asyncio.sleep(1)
+
+    # Post lecture notes
+    if paper.lecture_notes:
+        note_blocks = [blk_header(f"Notes: {paper.title[:200]}")]
+        for chunk in chunk_text(paper.lecture_notes, 5000):
+            note_blocks.append(blk_section(chunk))
+        await slack_post(client, text="Notes", blocks=note_blocks)
+
+    print(f"    Posted (with LLM notes).")
+    await asyncio.sleep(2)
+# ───────────────────────────────────────────────────────────────────────────────
 
 
 async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fetcher):
@@ -837,8 +854,9 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fet
             await slack_post(client,
                 text=f"Semantic Scholar papers by {author}",
                 blocks=[blk_section(
+                    # MODIFIED: updated label to reflect LLM notes are now included
                     f"*Semantic Scholar papers by {author}* "
-                    f"({len(scholar_unique)} found — titles & abstracts only, no LLM notes)"
+                    f"({len(scholar_unique)} found — with LLM notes)"
                 )],
             )
             for idx, paper in enumerate(scholar_unique, 1):
@@ -879,7 +897,8 @@ async def run_digest(client):
                 f"*Tracked Authors:*\n"
                 + "\n".join(f"  - {a}" for a in TRACKED_AUTHORS) + "\n\n"
                 f"_Running `{LLM_MODEL}` locally on {device.upper()}..._\n"
-                f"_Semantic Scholar results listed without LLM notes._"
+                # MODIFIED: all sources now include LLM notes
+                f"_All sources (arXiv, bioRxiv, Semantic Scholar) include LLM notes._"
             ),
         ],
     )
@@ -934,7 +953,6 @@ async def run_digest(client):
             ][:MAX_PAPERS_PER_TOPIC]
             print(f"  bioRxiv: {len(biorxiv_candidates)} fetched → {len(biorxiv_papers)} relevant")
 
-
             all_preprint_papers = arxiv_papers + biorxiv_papers
 
             if not all_preprint_papers:
@@ -983,8 +1001,9 @@ async def run_digest(client):
                     text=f"Semantic Scholar results for {topic['name']}",
                     blocks=[
                         blk_context(
+                            # MODIFIED: updated label to reflect LLM notes are now included
                             f"*Semantic Scholar:* {len(scholar_papers)} additional paper(s) "
-                            f"— titles & abstracts only (no LLM notes)"
+                            f"— with LLM notes"
                         )
                     ],
                 )
@@ -998,7 +1017,6 @@ async def run_digest(client):
                         "_No additional Semantic Scholar results for this topic._"
                     )],
                 )
-
 
         total_author = await run_author_section(
             client, arxiv_fetcher, biorxiv_fetcher, scholar_fetcher
@@ -1024,7 +1042,8 @@ async def run_digest(client):
             blk_section(
                 f"*Topic preprints (with LLM notes):* {total_topic}  "
                 f"(arXiv: {total_arxiv}, bioRxiv: {total_biorxiv})\n"
-                f"*Topic Semantic Scholar (no LLM notes):* {total_scholar}\n"
+                # MODIFIED: updated label to reflect LLM notes are now included
+                f"*Topic Semantic Scholar (with LLM notes):* {total_scholar}\n"
                 f"*Author papers:* {total_author}  "
                 f"({', '.join(TRACKED_AUTHORS)})\n\n"
                 f"Next automatic digest in *{h}h {m}m* "
@@ -1039,10 +1058,9 @@ async def run_digest(client):
 
     print(f"\n  Done")
     print(f"     Topic preprints (LLM): {total_topic}  ({total_arxiv} arXiv, {total_biorxiv} bioRxiv)")
-    print(f"     Topic Semantic Scholar (no LLM): {total_scholar}")
+    print(f"     Topic Semantic Scholar (with LLM): {total_scholar}")
     print(f"     Author papers: {total_author}")
     print(f"     Next digest  : {nxt.strftime('%Y-%m-%d %H:%M %Z')} (in {h}h {m}m)")
-
 
 
 async def scheduler(client):
