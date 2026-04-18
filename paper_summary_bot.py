@@ -715,11 +715,9 @@ async def post_paper_with_notes(client, paper, idx, total, generate_notes=True):
     await asyncio.sleep(2)
 
 
-# ── MODIFIED: now generates LLM notes for Semantic Scholar papers too ──────────
 async def post_scholar_paper(client, paper, idx, total):
     print(f"    [{idx}/{total}] Semantic Scholar  {paper.title[:200]}...")
 
-    # Generate LLM lecture notes
     paper.lecture_notes = generate_lecture_notes(paper)
     if device == "cuda":
         torch.cuda.empty_cache()
@@ -747,7 +745,6 @@ async def post_scholar_paper(client, paper, idx, total):
         ],
     )
 
-    # Post lecture notes
     if paper.lecture_notes:
         note_blocks = [blk_header(f"Notes: {paper.title[:200]}")]
         for chunk in chunk_text(paper.lecture_notes, 5000):
@@ -756,7 +753,6 @@ async def post_scholar_paper(client, paper, idx, total):
 
     print(f"    Posted (with LLM notes).")
     await asyncio.sleep(2)
-# ───────────────────────────────────────────────────────────────────────────────
 
 
 async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fetcher):
