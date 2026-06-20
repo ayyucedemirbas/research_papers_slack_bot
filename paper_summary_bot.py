@@ -12,20 +12,16 @@ print()
 TIMEZONE             = "Europe/Istanbul"
 RUN_HOUR             = 7
 RUN_MINUTE           = 0
-DAYS_LOOKBACK        = 15
-DAYS_LOOKBACK_AUTHOR = 20
+DAYS_LOOKBACK        = 30
+DAYS_LOOKBACK_AUTHOR = 30
 MAX_PAPERS_PER_TOPIC = 10
 MAX_AUTHOR_PAPERS    = 10
 MAX_SCHOLAR_PAPERS   = 20
 
 TRACKED_AUTHORS = [
     "Serdar Bozdag",
-    "Jubair Ibn Malik Rifat",
-    "Yashu Vashishath",
-    "Most Tahmina Rahman",
-    "Suman Pandey",
-    "Bizhan Alipour Pijani",
-    "Neha Goud Baddam",
+    "Faisal Mahmood",
+
 ]
 
 LLM_MODEL = "HuggingFaceH4/zephyr-7b-beta"
@@ -90,7 +86,8 @@ TOPICS = [
         ],
         "must_contain_any": ["multi-omics", "multiomics", "multi-modal omics",
                              "omics integration", "genomics", "transcriptomics",
-                             "proteomics", "metabolomics"],
+                             "proteomics", "metabolomics", "single cell", "spatial transcriptomics", "computational pathology", 
+                             "whole-slide images"],
         "must_also_contain_any": ["graph neural", "gnn", "graph convolutional",
                                   "graph attention", "graph transformer"],
     },
