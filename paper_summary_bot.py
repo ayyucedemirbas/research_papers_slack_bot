@@ -9,7 +9,7 @@ SLACK_BOT_TOKEN = getpass.getpass("1  Slack Bot Token  (xoxb-...): ").strip()
 SLACK_CHANNEL   = input(          "2  Slack Channel ID (C...):     ").strip()
 print()
 
-TIMEZONE             = "Europe/Istanbul"
+TIMEZONE             = "America/Chicago"
 RUN_HOUR             = 7
 RUN_MINUTE           = 0
 DAYS_LOOKBACK        = 30
@@ -41,7 +41,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("ResearchBot")
 
 print(f"Loading {LLM_MODEL} in 4-bit on GPU...")
-print("First run downloads ~4 GB - takes 2-4 minutes...\n")
 
 bnb_config = BitsAndBytesConfig(
     load_in_4bit=True,
@@ -59,7 +58,7 @@ model     = AutoModelForCausalLM.from_pretrained(
 model.eval()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"\nModel loaded on {device.upper()}")
+print(f"Model loaded on {device.upper()}")
 if device == "cpu":
     print("No GPU - generation will be very slow.")
     print("   Go to Runtime -> Change runtime type -> T4 GPU and re-run.\n")
@@ -341,7 +340,7 @@ class BiorxivFetcher:
         for term in terms:
             query   = f'({term}) AND {date_flt}'
             papers  = await self._epmc_search(query, page_size=max_results)
-            log.info(f"  [Europe PMC/bioRxiv] '{term[:50]}' → {len(papers)} results")
+            log.info(f"  [Europe PMC/bioRxiv] '{term[:50]}' -> {len(papers)} results")
             for p in papers:
                 if p.arxiv_id not in seen and p.title:
                     seen.add(p.arxiv_id)
@@ -364,7 +363,7 @@ class BiorxivFetcher:
                        for a in p.authors):
                     verified.append(p)
             if verified:
-                log.info(f"  [Europe PMC/bioRxiv] author '{author_name}' → {len(verified)} papers")
+                log.info(f"  [Europe PMC/bioRxiv] author '{author_name}' -> {len(verified)} papers")
                 return verified[:max_results]
             await asyncio.sleep(1)
         return []
@@ -457,7 +456,7 @@ class GoogleScholarFetcher:
         for query in queries:
             log.info(f"  [Semantic Scholar] '{query[:60]}'")
             papers = await self._s2_search(query, since_year, max_results=max_results * 2)
-            log.info(f"    → {len(papers)} results")
+            log.info(f"    {len(papers)} results")
             for p in papers:
                 if p.arxiv_id not in seen and p.title:
                     seen.add(p.arxiv_id)
@@ -522,7 +521,7 @@ class GoogleScholarFetcher:
         except Exception as e:
             log.error(f"S2 author papers error: {e}")
 
-        log.info(f"  [S2 author] '{author_name}' → {len(papers)} papers since {since_year}")
+        log.info(f"  [S2 author] '{author_name}' -> {len(papers)} papers since {since_year}")
         return papers[:max_results]
 
     async def close(self):
@@ -847,7 +846,6 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fet
             await slack_post(client,
                 text=f"Semantic Scholar papers by {author}",
                 blocks=[blk_section(
-                    # MODIFIED: updated label to reflect LLM notes are now included
                     f"*Semantic Scholar papers by {author}* "
                     f"({len(scholar_unique)} found — with LLM notes)"
                 )],
@@ -890,7 +888,6 @@ async def run_digest(client):
                 f"*Tracked Authors:*\n"
                 + "\n".join(f"  - {a}" for a in TRACKED_AUTHORS) + "\n\n"
                 f"_Running `{LLM_MODEL}` locally on {device.upper()}..._\n"
-                # MODIFIED: all sources now include LLM notes
                 f"_All sources (arXiv, bioRxiv, Semantic Scholar) include LLM notes._"
             ),
         ],
@@ -929,7 +926,7 @@ async def run_digest(client):
                 p for p in arxiv_candidates
                 if is_relevant(p, topic["must_contain_any"], topic["must_also_contain_any"])
             ][:MAX_PAPERS_PER_TOPIC]
-            print(f"  arXiv: {len(arxiv_candidates)} fetched → {len(arxiv_papers)} relevant")
+            print(f"  arXiv: {len(arxiv_candidates)} fetched -> {len(arxiv_papers)} relevant")
 
             biorxiv_candidates = []
             for term in topic["biorxiv_terms"]:
@@ -944,7 +941,7 @@ async def run_digest(client):
                 p for p in biorxiv_candidates
                 if is_relevant(p, topic["must_contain_any"], topic["must_also_contain_any"])
             ][:MAX_PAPERS_PER_TOPIC]
-            print(f"  bioRxiv: {len(biorxiv_candidates)} fetched → {len(biorxiv_papers)} relevant")
+            print(f"  bioRxiv: {len(biorxiv_candidates)} fetched -> {len(biorxiv_papers)} relevant")
 
             all_preprint_papers = arxiv_papers + biorxiv_papers
 
@@ -986,7 +983,7 @@ async def run_digest(client):
                 p for p in scholar_papers_raw
                 if p.title.lower()[:200] not in preprint_titles
             ][:MAX_SCHOLAR_PAPERS]
-            print(f"  Google Scholar: {len(scholar_papers_raw)} fetched → "
+            print(f"  Google Scholar: {len(scholar_papers_raw)} fetched "
                   f"{len(scholar_papers)} unique")
 
             if scholar_papers:
@@ -994,7 +991,6 @@ async def run_digest(client):
                     text=f"Semantic Scholar results for {topic['name']}",
                     blocks=[
                         blk_context(
-                            # MODIFIED: updated label to reflect LLM notes are now included
                             f"*Semantic Scholar:* {len(scholar_papers)} additional paper(s) "
                             f"— with LLM notes"
                         )
@@ -1035,12 +1031,11 @@ async def run_digest(client):
             blk_section(
                 f"*Topic preprints (with LLM notes):* {total_topic}  "
                 f"(arXiv: {total_arxiv}, bioRxiv: {total_biorxiv})\n"
-                # MODIFIED: updated label to reflect LLM notes are now included
                 f"*Topic Semantic Scholar (with LLM notes):* {total_scholar}\n"
                 f"*Author papers:* {total_author}  "
                 f"({', '.join(TRACKED_AUTHORS)})\n\n"
                 f"Next automatic digest in *{h}h {m}m* "
-                f"({RUN_HOUR:02d}:{RUN_MINUTE:02d} Istanbul time, UTC+3)."
+                f"({RUN_HOUR:02d}:{RUN_MINUTE:02d} America/Chicago)."
             ),
             blk_context(
                 f"ResearchBot  |  arXiv + bioRxiv (Europe PMC) + Semantic Scholar  |  "
