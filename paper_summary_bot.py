@@ -152,6 +152,41 @@ TOPICS = [
                                   "h&e", "deep learning", "neural network",
                                   "transformer", "convolutional"],
     },
+
+    {
+        "name": "Single-Cell RNA Sequencing (scRNA-seq) Analysis",
+        "arxiv_queries": [
+            'abs:"single-cell RNA" OR abs:"scRNA-seq" OR ti:"scRNA"',
+            'abs:"computational pipeline" OR abs:"transcriptomics" OR abs:"clustering"'
+        ],
+        "biorxiv_terms": [
+            "scRNA-seq analysis computational",
+            "single-cell RNA sequencing pipeline",
+            "scRNA-seq cell type clustering"
+        ],
+        "scholar_queries": [
+            "single-cell RNA sequencing scRNA-seq computational analysis pipeline"
+        ],
+        "must_contain_any": ["scrna-seq", "scrnaseq", "single-cell rna", "single cell rna", "single-cell transcriptomics"],
+        "must_also_contain_any": ["analysis", "pipeline", "computational", "clustering", "trajectory", "integration"]
+    },
+    {
+        "name": "Glioblastoma scRNA-seq Analysis",
+        "arxiv_queries": [
+            'abs:"glioblastoma" OR abs:"GBM" OR abs:"glioma"',
+            'abs:"scRNA-seq" OR abs:"single-cell RNA" OR abs:"single cell"'
+        ],
+        "biorxiv_terms": [
+            "glioblastoma scRNA-seq",
+            "GBM single-cell RNA tumor microenvironment",
+            "glioma scRNA-seq heterogeneity"
+        ],
+        "scholar_queries": [
+            "glioblastoma GBM scRNA-seq single-cell RNA analysis heterogeneity"
+        ],
+        "must_contain_any": ["glioblastoma", "gbm", "glioma", "astrocytoma"],
+        "must_also_contain_any": ["scrna-seq", "scrnaseq", "single-cell rna", "single cell rna", "single-cell", "single cell"]
+    },
 ]
 
 @dataclass
@@ -582,7 +617,7 @@ def generate_lecture_notes(paper: Paper) -> str:
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs,
-                max_new_tokens=5048,
+                max_new_tokens=10096,
                 do_sample=True,
                 temperature=0.4,
                 top_p=0.9,
@@ -640,7 +675,7 @@ def blk_context(text):
     return {"type": "context",
             "elements": [{"type": "mrkdwn", "text": text[:2900]}]}
 
-def chunk_text(text, max_len=2800):
+def chunk_text(text, max_len=4096):
     if len(text) <= max_len:
         return [text]
     chunks, cur = [], ""
@@ -867,7 +902,7 @@ async def run_author_section(client, arxiv_fetcher, biorxiv_fetcher, scholar_fet
 async def run_digest(client):
     now   = datetime.now(ZoneInfo(TIMEZONE))
     since = (now - timedelta(days=DAYS_LOOKBACK)).strftime("%B %d, %Y")
-    today = now.strftime("%A, %B %d, %Y  %H:%M Istanbul")
+    today = now.strftime("%A, %B %d, %Y  %H:%M CDT")
 
     print(f"  Starting digest - last {DAYS_LOOKBACK} days (since {since})")
 
